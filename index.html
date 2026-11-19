@@ -1,0 +1,99 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<title>ROBOT_ALTERNO · dashboard</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root { --bg:#0f1420; --panel:#171e2e; --borde:#273046; --txt:#e6e9f0; --tenue:#8b93a7; --verde:#3fb984; --rojo:#e5615b; --azul:#5b9be5; --amarillo:#e5b45b; }
+  * { box-sizing:border-box; }
+  body { margin:0; font:14px/1.45 system-ui,-apple-system,Segoe UI,Roboto,sans-serif; background:var(--bg); color:var(--txt); }
+  header { padding:18px 24px; border-bottom:1px solid var(--borde); display:flex; flex-wrap:wrap; gap:10px 28px; align-items:baseline; }
+  header h1 { margin:0; font-size:20px; }
+  .modo { padding:2px 10px; border-radius:12px; font-weight:600; font-size:12px; }
+  .modo.simulado { background:#2a3550; color:var(--azul); } .modo.testnet { background:#3d3220; color:var(--amarillo); }
+  main { padding:18px 24px; display:grid; gap:18px; }
+  .kpis { display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:12px; }
+  .kpi { background:var(--panel); border:1px solid var(--borde); border-radius:10px; padding:12px 14px; }
+  .kpi .v { font-size:22px; font-weight:650; font-variant-numeric:tabular-nums; } .kpi .l { color:var(--tenue); font-size:12px; }
+  section { background:var(--panel); border:1px solid var(--borde); border-radius:10px; padding:14px 16px; overflow-x:auto; }
+  section h2 { margin:0 0 10px; font-size:15px; } section p.nota { color:var(--tenue); margin:4px 0 10px; font-size:12px; }
+  table { border-collapse:collapse; width:100%; font-variant-numeric:tabular-nums; }
+  th, td { padding:6px 8px; border-bottom:1px solid var(--borde); text-align:right; white-space:nowrap; }
+  th:first-child, td:first-child, td.izq, th.izq { text-align:left; } th { color:var(--tenue); font-weight:600; font-size:12px; }
+  .pos { color:var(--verde); } .neg { color:var(--rojo); } .tenue { color:var(--tenue); }
+  .barra { display:inline-block; height:8px; border-radius:4px; background:var(--azul); vertical-align:middle; }
+  svg { width:100%; height:220px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>ROBOT_ALTERNO</h1>
+  <span id="modo" class="modo"></span>
+  <span class="tenue" id="gen"></span>
+  <span class="tenue" id="ini"></span>
+</header>
+<main>
+  <div class="kpis" id="kpis"></div>
+  <section><h2>Curva acumulada (R cerrado)</h2><svg id="curva" viewBox="0 0 1000 220" preserveAspectRatio="none"></svg></section>
+  <section><h2>Candidatas</h2>
+    <p class="nota">P(gana) = probabilidad bayesiana de que el R medio sea &gt; 0: parte del histórico (prior escéptico) y se actualiza con cada trade cerrado del forward. R en unidades de R (3·ATR 1h a la entrada) con la salida de cada candidata.</p>
+    <table id="tcand"></table></section>
+  <section><h2>Trades abiertos</h2><table id="tab"></table></section>
+  <section><h2>Últimos trades cerrados</h2><table id="tcer"></table></section>
+  <section><h2>Carry de funding</h2><p class="nota">Corto en el perpetuo (testnet de futuros, sumado a la posición neta) + largo al contado (testnet de contado), 100 USDT por pata. "Patas" = testnet si se enviaron órdenes, simulado si la moneda no existe en el contado de la testnet. Resultado = fundings cobrados − 0,20 % de coste ± cambio de base (contado − perpetuo).</p><table id="tcar"></table></section>
+  <section><h2>Posición neta en Binance testnet</h2><p class="nota">Solo en modo testnet. Una posición por moneda (One-Way): la suma de los trades abiertos del registro.</p><table id="tpos"></table></section>
+  <section><h2>Órdenes recientes</h2><table id="tord"></table></section>
+  <section><h2>Alertas</h2><table id="tale"></table></section>
+  <section><h2>Ciclos</h2><table id="tcic"></table></section>
+</main>
+<script src="estado.js"></script>
+<script>
+const E = window.ESTADO || {candidatas:[],curva:[],abiertos:[],cerrados:[],alertas:[],ordenes:[],ciclos:[],posiciones_binance:{}};
+const f = (x, d=2) => (x === null || x === undefined || Number.isNaN(x)) ? "—" : Number(x).toLocaleString("es", {minimumFractionDigits:d, maximumFractionDigits:d});
+const sg = (x, d=2) => (x === null || x === undefined) ? "—" : `<span class="${x>0?'pos':x<0?'neg':''}">${x>0?'+':''}${f(x,d)}</span>`;
+const fecha = ms => ms ? new Date(Number(ms)).toISOString().slice(0,16).replace("T"," ") + "Z" : "—";
+const dir = s => Number(s) > 0 ? '<span class="pos">LONG</span>' : '<span class="neg">SHORT</span>';
+function tabla(id, cab, filas) { document.getElementById(id).innerHTML = "<tr>" + cab.map(c => `<th>${c}</th>`).join("") + "</tr>" +
+  (filas.length ? filas.map(r => "<tr>" + r.map(v => `<td>${v}</td>`).join("") + "</tr>").join("") : `<tr><td class="tenue" colspan="${cab.length}">sin datos</td></tr>`); }
+
+document.getElementById("modo").textContent = E.modo === "testnet" ? "TESTNET (dinero ficticio)" : "SIMULADO (sin órdenes)";
+document.getElementById("modo").className = "modo " + (E.modo || "simulado");
+document.getElementById("gen").textContent = "actualizado " + fecha(E.generado);
+document.getElementById("ini").textContent = "forward desde " + (E.inicio_forward || "—");
+
+const cerr = E.cerrados || [], tot = E.candidatas.reduce((a, c) => a + (c.R_total || 0), 0), usd = E.candidatas.reduce((a, c) => a + (c.pnl_usdt || 0), 0);
+const n = E.candidatas.reduce((a, c) => a + (c.N || 0), 0);
+document.getElementById("kpis").innerHTML = [
+  ["Capital (USDT)", f(E.capital_usdt, 0)], ["Riesgo por trade", f(E.riesgo_pct, 2) + " %"],
+  ["Trades abiertos", (E.abiertos || []).length], ["Riesgo abierto (USDT)", f(E.riesgo_abierto_usdt, 0)],
+  ["Trades cerrados", n], ["R total cerrado", sg(tot)], ["R/trade", sg(n ? tot / n : null, 3)], ["PnL modelo (USDT)", sg(usd, 0)]
+].map(([l, v]) => `<div class="kpi"><div class="v">${v}</div><div class="l">${l}</div></div>`).join("");
+
+(function () { const c = E.curva || [], svg = document.getElementById("curva");
+  if (c.length < 2) { svg.innerHTML = '<text x="20" y="110" fill="#8b93a7">sin trades cerrados todavía</text>'; return; }
+  const ys = c.map(p => p.R), mn = Math.min(0, ...ys), mx = Math.max(0, ...ys), W = 1000, Hh = 220, pad = 10;
+  const X = i => pad + i * (W - 2 * pad) / (c.length - 1), Y = v => Hh - pad - (v - mn) * (Hh - 2 * pad) / ((mx - mn) || 1);
+  svg.innerHTML = `<line x1="0" x2="${W}" y1="${Y(0)}" y2="${Y(0)}" stroke="#273046"/>` +
+    `<polyline fill="none" stroke="${ys[ys.length-1] >= 0 ? '#3fb984' : '#e5615b'}" stroke-width="2" points="${c.map((p, i) => X(i) + ',' + Y(p.R)).join(' ')}"/>`; })();
+
+tabla("tcand", ["Candidata", "Cerrados", "Abiertos", "R/trade", "R total", "Acierto", "PnL (USDT)", "R esperado (Bayes)", "P(gana)"],
+  [...E.candidatas].sort((a, b) => (b.P_gana || 0) - (a.P_gana || 0)).map(c => [c.candidata, c.N, c.abiertos, sg(c.R_medio, 3), sg(c.R_total),
+    c.acierto == null ? "—" : f(100 * c.acierto, 0) + " %", sg(c.pnl_usdt, 0), sg(c.R_esperado, 3),
+    `<span class="barra" style="width:${Math.round(60 * (c.P_gana || 0))}px"></span> ${f(100 * (c.P_gana || 0), 0)} %`]));
+tabla("tab", ["Candidata", "Moneda", "Dir", "Entrada", "Precio", "TP", "SL", "Vida (h)", "Cantidad", "Riesgo (USDT)"],
+  (E.abiertos || []).map(t => [t.candidata, t.sym, dir(t.s), fecha(t.entry_ts), f(t.entry_price, 6), t.tp ? f(t.tp, 6) : "—",
+    t.sl ? f(t.sl, 6) : "—", t.vida_h, f(t.qty, 4), f(t.riesgo_usdt, 2)]));
+tabla("tcer", ["Candidata", "Moneda", "Dir", "Entrada", "Salida", "Motivo", "R", "PnL (USDT)"],
+  cerr.map(t => [t.candidata, t.sym, dir(t.s), fecha(t.entry_ts), fecha(t.exit_ts), t.motivo, sg(t.R_res), sg(t.pnl_usdt)]));
+tabla("tcar", ["Moneda", "Patas", "Estado", "Abierta", "Cerrada", "Fundings", "Funding cobrado", "Base", "Resultado", "PnL (USDT)"],
+  (E.carry || []).map(x => [x.sym, x.real ? "testnet" : "simulado", x.estado, fecha(x.abierto_ts), fecha(x.cerrado_ts), x.n_fundings, sg(100 * (x.funding_acum || 0), 3) + " %",
+    x.base_res == null ? "—" : sg(100 * x.base_res, 3) + " %", x.resultado == null ? "—" : sg(100 * x.resultado, 3) + " %", x.pnl_usdt == null ? "—" : sg(x.pnl_usdt, 2)]));
+tabla("tpos", ["Moneda", "Cantidad neta"], Object.entries(E.posiciones_binance || {}).map(([k, v]) => [k, f(v, 6)]));
+tabla("tord", ["Hora", "Moneda", "Lado", "Cantidad", "Objetivo", "Previo", "Precio ref.", "Estado"],
+  (E.ordenes || []).map(o => [fecha(o.ts), o.sym, o.side, f(o.qty, 6), f(o.objetivo, 6), f(o.previo, 6), f(o.precio_ref, 6), o.estado]));
+tabla("tale", ["Hora", "Tipo", "Detalle"], (E.alertas || []).map(a => [fecha(a.ts), a.tipo, `<span class="izq">${String(a.detalle).slice(0, 300)}</span>`]));
+tabla("tcic", ["Hora", "Modo", "Resumen"], (E.ciclos || []).map(x => [fecha(x.ts), x.modo, `<span class="tenue">${x.resumen}</span>`]));
+</script>
+</body>
+</html>
